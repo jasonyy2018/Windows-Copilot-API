@@ -31,6 +31,7 @@ You sign in once in a browser with your Microsoft **or Google** account; your se
 - [Project layout](#project-layout)
 - [Notes & limitations](#notes--limitations)
 - [Troubleshooting](#troubleshooting)
+- [Collaboration & support](#collaboration--support)
 - [License](#license)
 - [Star History](#star-history)
 
@@ -352,6 +353,18 @@ usually obvious.
 > earned there — pass `--report-only`, and do the clearance step on a machine
 > with a display (or route traffic through a residential connection, e.g. a
 > home-PC exit node), since datacenter IPs are where Cloudflare is strictest.
+
+---
+
+## Collaboration & support
+
+Need a hand getting this running? Open a [GitHub issue](../../issues) for bugs (for setup/auth problems, attach the redacted `diagnostic_report.txt` from `python tests/diagnostic.py`), start a [discussion](../../discussions) to share ideas, or send a pull request.
+
+And if you're working on something interesting, or looking for someone to build it, I'm always open to a chat. Feel free to reach out:
+
+- X: [@sums001](https://x.com/sums001)
+- Email: [devsum0101@gmail.com](mailto:devsum0101@gmail.com)
+- Discord: `sum_s_s`
 
 ---
 
