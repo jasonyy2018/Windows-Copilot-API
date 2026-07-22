@@ -109,23 +109,31 @@ Prefer a container? You can run the OpenAI-compatible server in Docker once you'
 # 1. Clone and enter the project
 git clone https://github.com/sums001/Windows-Copilot-API.git
 cd Windows-Copilot-API
+```
 
-# 2. Build the image
-docker compose build
+**Step 1: Sign in on your HOST machine** (requires a visible browser)
 
-# 3. Sign in for the first time (opens a visible browser inside a temporary container)
-docker compose run --rm copilot-api python -m copilot login
+```bash
+pip install -r requirements.txt
+playwright install chromium
+python -m copilot login
 #    ^ A browser window opens — log into your Microsoft or Google account.
-#    The container closes automatically after sign-in is detected.
+#    It finishes automatically once sign-in is detected.
+```
 
-# 4. Start the API server
+**Step 2: Build and start the Docker container**
+
+```bash
+docker compose build
 docker compose up -d
 
-# 5. Verify it's running
+# Verify it's running
 curl http://localhost:8000/v1/models
 ```
 
-The [docker-compose.yml](docker-compose.yml) maps port `8000`, uses a named volume (`copilot-session`) to persist your browser profile and auth tokens across restarts, and includes a health check. The server runs headless with **automatic Cloudflare clearance refresh** — when `cf_clearance` expires (~30 min), the container launches a background browser to re-solve the challenge without any manual intervention.
+The [docker-compose.yml](docker-compose.yml) maps port `8000` and bind-mounts `./session` so your browser profile and auth tokens persist across restarts. The server runs headless with **automatic Cloudflare clearance refresh** — when `cf_clearance` expires (~30 min), the container launches a background browser to re-solve the challenge without any manual intervention.
+
+> **Why login on the host?** The login step opens a *visible* browser, which can't run inside a headless container. After the first login, the session is persisted in `./session/` and mounted into the container — the container only needs headless token/clearance refresh.
 
 ### Tuning
 
@@ -144,10 +152,10 @@ To run without Compose, build and pass the same bindings by hand:
 
 ```bash
 docker build -t windows-copilot-api .
-docker run --rm -p 8000:8000 windows-copilot-api
+docker run --rm -p 8000:8000 -v "$(pwd)/session:/app/session" windows-copilot-api
 ```
 
-> **Note:** Without the volume mount you'll need to re-login on every restart. Use `docker compose` for persistent sessions.
+> **Note:** Without the `-v $(pwd)/session:/app/session` mount you'll need to re-login on every restart. Use `docker compose` for persistent sessions.
 
 ### Daily operations
 
@@ -161,8 +169,8 @@ docker compose restart
 # Update to latest code
 git pull && docker compose up -d --build
 
-# Inspect session data
-docker exec -it copilot-api ls -la /app/session/
+# Inspect session data (on your host)
+ls -la session/
 
 # Stop and clean up
 docker compose down
@@ -172,7 +180,7 @@ docker compose down
 
 - **Clearance won't auto-refresh:** If the container runs on a datacenter IP, Cloudflare may escalate to an interactive checkbox that headless mode can't solve. Re-login on a residential connection, or set `interactive_clear=True` in `server/api.py`.
 - **Rate limit hits:** Default is 12 requests/minute. Increase via `RATE_LIMIT_RPM` env var if needed.
-- **Session lost after restart:** Check `docker volume ls` — the `Windows-Copilot-API_copilot-session` volume should exist. Remove and re-login if corrupted.
+- **Session lost after restart:** The session is stored in `./session/` on your host. Don't delete it — it contains your browser profile and auth tokens. If corrupted, re-run `python -m copilot login` on the host.
 
 ---
 

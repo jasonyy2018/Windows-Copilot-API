@@ -4,12 +4,11 @@
 #   docker compose up -d          # start the service
 #   docker compose down           # stop and clean up
 #
-# First-time setup (interactive login on the host):
-#   docker compose run --rm copilot-api python -m copilot login
-# Then restart:
-#   docker compose up -d
+# First-time setup (interactive login MUST run on the host):
+#   python -m copilot login       # opens a visible browser, saves session/
+# Then start the container — it reuses the persisted session.
 #
-# The session volume persists browser profile + auth tokens across restarts.
+# The ./session directory persists browser profile + auth tokens across restarts.
 
 services:
   copilot-api:
@@ -26,9 +25,10 @@ services:
       RATE_LIMIT_RPM: "${RATE_LIMIT_RPM:-12}"
       RATE_LIMIT_BURST: "${RATE_LIMIT_BURST:-4}"
     volumes:
-      # Named volume for session persistence (browser profile + token.json).
-      # Use a named volume instead of bind-mount to avoid Linux permission issues.
-      - copilot-session:/app/session
+      # Bind-mount the local session directory into the container.
+      # Sign in once on the host (`python -m copilot login`) so this folder
+      # is populated; the container reuses the browser profile + token.
+      - ./session:/app/session
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/models')"]
@@ -41,7 +41,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
-volumes:
-  copilot-session:
-    driver: local
