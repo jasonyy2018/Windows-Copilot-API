@@ -103,19 +103,76 @@ The browser **closes by itself** once sign-in is detected — you don't need to 
 
 Prefer a container? You can run the OpenAI-compatible server in Docker once you've signed in.
 
-> **Sign in on the host first.** The login step above opens a *visible* browser, which can't run inside the headless container — so run `python -m copilot login` on your host to populate `session/`. The container mounts that folder and reuses the Cloudflare clearance earned on the host. It refreshes the chat token headlessly, but it can't earn *fresh* clearance without a visible browser, so when clearance expires (~30 min) it returns a `503` — re-run `python -m copilot login` on the host to refresh `session/`.
+### Quick start
 
 ```bash
-docker compose up --build
-# -> Copilot OpenAI-compatible API on http://localhost:8000
+# 1. Clone and enter the project
+git clone https://github.com/sums001/Windows-Copilot-API.git
+cd Windows-Copilot-API
+
+# 2. Build the image
+docker compose build
+
+# 3. Sign in for the first time (opens a visible browser inside a temporary container)
+docker compose run --rm copilot-api python -m copilot login
+#    ^ A browser window opens — log into your Microsoft or Google account.
+#    The container closes automatically after sign-in is detected.
+
+# 4. Start the API server
+docker compose up -d
+
+# 5. Verify it's running
+curl http://localhost:8000/v1/models
 ```
 
-The [docker-compose.yml](docker-compose.yml) maps port `8000` and bind-mounts your `session/` so the login persists across restarts. Tune `RATE_LIMIT_RPM` / `RATE_LIMIT_BURST` there. To run without Compose, build and pass the same bindings by hand:
+The [docker-compose.yml](docker-compose.yml) maps port `8000`, uses a named volume (`copilot-session`) to persist your browser profile and auth tokens across restarts, and includes a health check. The server runs headless with **automatic Cloudflare clearance refresh** — when `cf_clearance` expires (~30 min), the container launches a background browser to re-solve the challenge without any manual intervention.
+
+### Tuning
+
+Copy `.env.example` to `.env` and adjust values:
+
+```bash
+cp .env.example .env
+# Edit .env — change RATE_LIMIT_RPM, RATE_LIMIT_BURST, etc.
+```
+
+Then `docker compose up -d` picks them up automatically.
+
+### Without Compose
+
+To run without Compose, build and pass the same bindings by hand:
 
 ```bash
 docker build -t windows-copilot-api .
-docker run --rm -p 8000:8000 -v "$(pwd)/session:/app/session" windows-copilot-api
+docker run --rm -p 8000:8000 windows-copilot-api
 ```
+
+> **Note:** Without the volume mount you'll need to re-login on every restart. Use `docker compose` for persistent sessions.
+
+### Daily operations
+
+```bash
+# View logs
+docker compose logs -f
+
+# Restart (triggers token refresh from persisted session)
+docker compose restart
+
+# Update to latest code
+git pull && docker compose up -d --build
+
+# Inspect session data
+docker exec -it copilot-api ls -la /app/session/
+
+# Stop and clean up
+docker compose down
+```
+
+### Troubleshooting
+
+- **Clearance won't auto-refresh:** If the container runs on a datacenter IP, Cloudflare may escalate to an interactive checkbox that headless mode can't solve. Re-login on a residential connection, or set `interactive_clear=True` in `server/api.py`.
+- **Rate limit hits:** Default is 12 requests/minute. Increase via `RATE_LIMIT_RPM` env var if needed.
+- **Session lost after restart:** Check `docker volume ls` — the `Windows-Copilot-API_copilot-session` volume should exist. Remove and re-login if corrupted.
 
 ---
 
@@ -218,9 +275,7 @@ On a trusted connection the check often passes invisibly with no window at all. 
 datacenter/VPN IP is stricter and more likely to show the checkbox; a residential
 connection clears most reliably.
 
-The **server** never opens a window: when clearance expires it returns a `503`
-(`type: "clearance_required"`). Re-clear out of band with `python -m copilot
-login`, then retry.
+The **server** (Docker or `python app.py`) runs headless with `headless_clear=True`: when clearance expires, it automatically launches a background browser to re-solve the challenge. On a trusted connection this is invisible. If Cloudflare escalates to an interactive checkbox on a datacenter IP, the server returns a `503` (`type: "clearance_required"`) — re-login with `docker compose run --rm copilot-api python -m copilot login` (or `python -m copilot login` on the host) and retry.
 
 ---
 

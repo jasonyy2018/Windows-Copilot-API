@@ -21,12 +21,10 @@ from .ratelimit import TokenBucket
 from .schemas import ChatCompletionRequest
 
 app = FastAPI(title="Copilot OpenAI-compatible API", version="1.0.0")
-# Server runs headless and must never pop a visible browser mid-request. With
-# both recovery passes disabled, an expired clearance surfaces immediately as a
-# 503 (see ClearanceRequired handling below) so an operator can re-clear out of
-# band (`python -m copilot login`). Headless auto-solve is intentionally off:
-# it's unreliable on low-trust egress and a failed pass can wedge the session.
-client = CopilotClient(interactive_clear=False, headless_clear=False)
+# Server runs headless. `headless_clear=True` attempts automatic Turnstile solving
+# when Cloudflare clearance expires — works on trusted egress (residential IPs).
+# `interactive_clear=False` prevents a visible browser from popping mid-request.
+client = CopilotClient(interactive_clear=False, headless_clear=True)
 
 _CLEARANCE_HELP = (
     "Cloudflare clearance expired and could not be refreshed headlessly. "

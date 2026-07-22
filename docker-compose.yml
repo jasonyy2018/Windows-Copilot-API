@@ -1,7 +1,21 @@
+# Copilot OpenAI-compatible API — Docker Compose
+#
+# Usage:
+#   docker compose up -d          # start the service
+#   docker compose down           # stop and clean up
+#
+# First-time setup (interactive login on the host):
+#   docker compose run --rm copilot-api python -m copilot login
+# Then restart:
+#   docker compose up -d
+#
+# The session volume persists browser profile + auth tokens across restarts.
+
 services:
   copilot-api:
     build: .
     image: windows-copilot-api
+    container_name: copilot-api
     ports:
       - "8000:8000"
     environment:
@@ -9,11 +23,25 @@ services:
       HOST: "0.0.0.0"
       PORT: "8000"
       # Self-imposed rate limit (see server/config.py). Tune to your account.
-      RATE_LIMIT_RPM: "12"
-      RATE_LIMIT_BURST: "4"
+      RATE_LIMIT_RPM: "${RATE_LIMIT_RPM:-12}"
+      RATE_LIMIT_BURST: "${RATE_LIMIT_BURST:-4}"
     volumes:
-      # Persist the signed-in browser profile + cached token across restarts.
-      # Sign in once on the host (`python -m copilot login`) so this folder is
-      # populated; the container only does the headless token refresh.
-      - ./session:/app/session
+      # Named volume for session persistence (browser profile + token.json).
+      # Use a named volume instead of bind-mount to avoid Linux permission issues.
+      - copilot-session:/app/session
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/models')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  copilot-session:
+    driver: local
