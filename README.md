@@ -83,11 +83,11 @@ venv\Scripts\Activate.ps1
 **3. Install dependencies and sign in**
 
 ```bash
-# Install dependencies
+# Install Python dependencies
 pip install -r requirements.txt
 
-# Install the browser Playwright needs (one-time)
-playwright install chromium
+# Install Chromium via npx (recommended — ensures correct version)
+npx playwright install chromium
 
 # Sign in once: a browser opens, log into your Microsoft or Google account
 python -m copilot login
@@ -115,7 +115,7 @@ cd Windows-Copilot-API
 
 ```bash
 pip install -r requirements.txt
-playwright install chromium
+npx playwright install chromium
 python -m copilot login
 #    ^ A browser window opens — log into your Microsoft or Google account.
 #    It finishes automatically once sign-in is detected.
