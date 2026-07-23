@@ -7,16 +7,19 @@ LABEL org.opencontainers.image.description="OpenAI-compatible API for Microsoft 
 
 WORKDIR /app
 
-# Install Python deps first so the layer caches across code changes.
+# Install deps first so the layer caches across code changes.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && python -m playwright install chromium
+    && python -m playwright install chromium \
+    && apt-get update && apt-get install -y xvfb \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY . .
 
 # Serve on all interfaces inside the container; map the port in compose.
 ENV HOST=0.0.0.0 \
-    PORT=8000
+    PORT=8000 \
+    DISPLAY=:99
 
 EXPOSE 8000
 

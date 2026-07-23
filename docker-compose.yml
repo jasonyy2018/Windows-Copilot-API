@@ -29,6 +29,8 @@ services:
       # Sign in once on the host (`python -m copilot login`) so this folder
       # is populated; the container reuses the browser profile + token.
       - ./session:/app/session
+    entrypoint: >
+      sh -c "Xvfb :99 -screen 0 1024x768x24 & sleep 1 && python app.py"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/models')"]
