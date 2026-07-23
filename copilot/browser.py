@@ -860,6 +860,7 @@ async (args) => {
     return {text: texts.join(''), conversationId: cid};
 }
 """
+    def browser_chat(
         self, prompt: str, conversation_id: str = None, timeout: int = 900
     ) -> Generator:
         """Complete a Copilot chat through the browser's own TLS context.
