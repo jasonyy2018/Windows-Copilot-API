@@ -83,14 +83,11 @@ venv\Scripts\Activate.ps1
 **3. Install dependencies and sign in**
 
 ```bash
-# Install Python dependencies
-pip install -r requirements.txt
-
-# Install Chromium via npx (recommended — ensures correct version)
-npx playwright install chromium
+# Install Python deps + Chromium via npm wrapper
+npm run setup
 
 # Sign in once: a browser opens, log into your Microsoft or Google account
-python -m copilot login
+npm run login
 ```
 
 The browser **closes by itself** once sign-in is detected — you don't need to press Enter or close it manually. After sign-in it sends one short warm-up message that mints the chat token **and** passes Cloudflare's "verify you're human" check in the same step (a brief "finishing setup…" appears, and a tiny throwaway chat lands in your history). If a checkbox shows up, click it in that login window. The steps are logged to `session/login.log` if anything goes wrong. That's it: your session is saved under `session/` (git-ignored, never shared) and reused on every run — so your first request works right away.
@@ -114,11 +111,12 @@ cd Windows-Copilot-API
 **Step 1: Sign in on your HOST machine** (requires a visible browser)
 
 ```bash
-pip install -r requirements.txt
-npx playwright install chromium
-python -m copilot login
-#    ^ A browser window opens — log into your Microsoft or Google account.
-#    It finishes automatically once sign-in is detected.
+# Install Python deps + Chromium
+npm run setup
+
+# Open a browser, log into your Microsoft or Google account
+npm run login
+#    ^ It finishes automatically once sign-in is detected.
 ```
 
 **Step 2: Build and start the Docker container**
@@ -148,14 +146,24 @@ Then `docker compose up -d` picks them up automatically.
 
 ### Without Compose
 
-To run without Compose, build and pass the same bindings by hand:
-
 ```bash
-docker build -t windows-copilot-api .
-docker run --rm -p 8000:8000 -v "$(pwd)/session:/app/session" windows-copilot-api
+npm run setup
+npm run login
+npm start
 ```
 
-> **Note:** Without the `-v $(pwd)/session:/app/session` mount you'll need to re-login on every restart. Use `docker compose` for persistent sessions.
+### Native Node.js (alternative)
+
+If you prefer a pure Node.js deployment, use the companion project [windows-copilot-agent](https://github.com/jasonyy2018/windows-copilot-agent):
+
+```bash
+git clone https://github.com/jasonyy2018/windows-copilot-agent.git
+cd windows-copilot-agent
+npm install
+npx playwright install chromium
+npm run login
+docker compose up --build -d
+```
 
 ### Daily operations
 
@@ -178,9 +186,9 @@ docker compose down
 
 ### Troubleshooting
 
-- **Clearance won't auto-refresh:** If the container runs on a datacenter IP, Cloudflare may escalate to an interactive checkbox that headless mode can't solve. Re-login on a residential connection, or set `interactive_clear=True` in `server/api.py`.
-- **Rate limit hits:** Default is 12 requests/minute. Increase via `RATE_LIMIT_RPM` env var if needed.
-- **Session lost after restart:** The session is stored in `./session/` on your host. Don't delete it — it contains your browser profile and auth tokens. If corrupted, re-run `python -m copilot login` on the host.
+- **npm run setup 失败**: 确保 Node.js >= 20 (`node --version`)。如果 pip 不存在，先安装 `apt install python3-pip`（Debian/Ubuntu）或 `brew install python`（macOS）。
+- **npx playwright install chromium 失败**: 在 Linux 服务器上需要系统依赖，运行 `npx playwright install --with-deps chromium`。
+- **Session lost after restart:** The session is stored in `./session/` on your host. Don't delete it — it contains your browser profile and auth tokens. If corrupted, re-run `npm run login` on the host.
 
 ---
 
@@ -259,8 +267,15 @@ curl http://localhost:8000/v1/chat/completions \
 ## Command line
 
 ```bash
-python -m copilot login          # sign in and save the session
-python -m copilot ask "Hello!"   # quick one-shot question
+npm run login          # sign in and save the session
+npm run ask "Hello!"   # quick one-shot question
+```
+
+Or with Python directly:
+
+```bash
+python -m copilot login
+python -m copilot ask "Hello!"
 ```
 
 ---
@@ -271,7 +286,7 @@ Copilot's chat sits behind Cloudflare. Access needs a `cf_clearance` cookie,
 earned by passing a "verify you're human" check in a real browser, and it lasts
 about half an hour. The bridge handles this for you:
 
-- **At sign-in:** `python -m copilot login` earns clearance as part of the same
+- **At sign-in:** `npm run login` earns clearance as part of the same
   warm-up that mints your token, so your first request works immediately. If
   Cloudflare shows a checkbox, click it in the login window.
 - **When it expires:** if a later request hits the gate, the bridge opens a
@@ -283,7 +298,7 @@ On a trusted connection the check often passes invisibly with no window at all. 
 datacenter/VPN IP is stricter and more likely to show the checkbox; a residential
 connection clears most reliably.
 
-The **server** (Docker or `python app.py`) runs headless with `headless_clear=True`: when clearance expires, it automatically launches a background browser to re-solve the challenge. On a trusted connection this is invisible. If Cloudflare escalates to an interactive checkbox on a datacenter IP, the server returns a `503` (`type: "clearance_required"`) — re-login with `docker compose run --rm copilot-api python -m copilot login` (or `python -m copilot login` on the host) and retry.
+The **server** (Docker or `npm start`) runs headless with `headless_clear=True`: when clearance expires, it automatically launches a background browser to re-solve the challenge. On a trusted connection this is invisible. If Cloudflare escalates to an interactive checkbox on a datacenter IP, the server returns a `503` (`type: "clearance_required"`) — re-login with `npm run login` on the host and retry.
 
 ---
 

@@ -1,0 +1,20 @@
+{
+  "name": "windows-copilot-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Microsoft Copilot bridge with an OpenAI-compatible API",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "login": "python -m copilot login",
+    "ask": "python -m copilot ask",
+    "dev": "python app.py",
+    "start": "python app.py",
+    "install:playwright": "npx playwright install chromium",
+    "setup": "pip install -r requirements.txt && npx playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "1.60.0"
+  }
+}
