@@ -890,6 +890,7 @@ class BrowserCopilot:
             pass  # already exposed
 
         page.evaluate(f"""() => {{
+            window.__copilotChat = window.__copilotChat || {{}};
             const ws = new WebSocket({ws_url_esc});
             window.__copilotChat.ws = ws;
             ws.onopen = () => {{
