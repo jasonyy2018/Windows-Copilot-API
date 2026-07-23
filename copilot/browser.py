@@ -800,6 +800,11 @@ class BrowserCopilot:
         when reused via curl_cffi. This method keeps the entire REST + WebSocket
         exchange inside the same browser, where the clearance cookie is valid.
 
+        Before chatting it navigates the page back to Copilot — the caller may have
+        left the page in an unpredictable state (e.g. after ``auto_clear``'s warmup
+        turn). Then it ensures authentication (minting a fresh token if needed),
+        creates a conversation, opens a WebSocket, and yields streamed responses.
+
         Yields ``str`` text chunks (and :class:`copilot.models.ImageResponse` for
         generated images). ``conversation_id`` continues an existing thread or
         creates a new one when ``None``. After iteration, read
@@ -809,18 +814,22 @@ class BrowserCopilot:
         self._browser_chat_conversation_id = conversation_id
         page = self._page
 
-        _CHAT_BRIDGE_JS = """
-        () => {
-            window.__copilotChat = window.__copilotChat || {
-                messages: [],
-                event: null,
-                error: null,
-                done: false,
-                ws: null,
-            };
-        }
-        """
-        # --- 1. Create conversation via browser fetch ----------------------------
+        # Navigate back to Copilot fresh — auto_clear may have left the page in
+        # a "reply received" state that breaks subsequent fetch/WS operations.
+        page.goto(COPILOT_URL, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)
+
+        # --- 1. Ensure a fresh chat token -----------------------------------------
+        self._install_ws_listener()
+        token = self.access_token()
+        if not token:
+            self._send_warmup()
+            deadline = time.time() + 45
+            while time.time() < deadline and not token:
+                token = self._captured_chat_token or self.access_token()
+                page.wait_for_timeout(500)
+
+        # --- 2. Create conversation via browser fetch ----------------------------
         if not conversation_id:
             try:
                 result = page.evaluate("""async () => {
@@ -841,8 +850,7 @@ class BrowserCopilot:
         # conversation_id is known — use it in send payload below.
         # It is NOT yielded here; the caller tracks the id on its own.
 
-        # --- 2. Build the WebSocket URL ------------------------------------------
-        token = self.access_token()
+        # --- 3. Build the WebSocket URL ------------------------------------------
         ws_url = f"{CHAT_WEBSOCKET_URL}&clientSessionId={uuid.uuid4()}"
         if token:
             from urllib.parse import quote as _quote
