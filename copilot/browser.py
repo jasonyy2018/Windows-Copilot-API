@@ -28,16 +28,21 @@ shapes with ``tests/diagnostic.py`` if Microsoft changes them.
 from __future__ import annotations
 
 import json
+import queue
 import sys
+import uuid
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from threading import Event
+from typing import Dict, Generator, Optional
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright, Error as PlaywrightError
 
 from .auth import DEFAULT_AUTH_FILE, DEFAULT_PROFILE_DIR
+from .models import ImageResponse
+from .protocol import CHAT_WEBSOCKET_URL, CONSENTS_FRAME, SET_OPTIONS_FRAME
 from .useragent import CHROME_UA
 
 COPILOT_URL = "https://copilot.microsoft.com/"
@@ -783,6 +788,210 @@ class BrowserCopilot:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(json.dumps(auth, indent=2), encoding="utf-8")
         return auth
+
+    def browser_chat(
+        self, prompt: str, conversation_id: str = None, timeout: int = 900
+    ) -> Generator:
+        """Complete a Copilot chat through the browser's own TLS context.
+
+        This is the **only** way to successfully use a freshly-earned cf_clearance:
+        Playwright's Chromium TLS fingerprint differs from curl_cffi's impersonated
+        fingerprint, so a ``cf_clearance`` cookie earned by Playwright is rejected
+        when reused via curl_cffi. This method keeps the entire REST + WebSocket
+        exchange inside the same browser, where the clearance cookie is valid.
+
+        Yields ``str`` text chunks (and :class:`copilot.models.ImageResponse` for
+        generated images). ``conversation_id`` continues an existing thread or
+        creates a new one when ``None``. After iteration, read
+        ``self._browser_chat_conversation_id`` to retrieve the conversation id.
+        """
+        self._ensure_started()
+        self._browser_chat_conversation_id = conversation_id
+        page = self._page
+
+        _CHAT_BRIDGE_JS = """
+        () => {
+            window.__copilotChat = window.__copilotChat || {
+                messages: [],
+                event: null,
+                error: null,
+                done: false,
+                ws: null,
+            };
+        }
+        """
+        # --- 1. Create conversation via browser fetch ----------------------------
+        if not conversation_id:
+            try:
+                result = page.evaluate("""async () => {
+                    const r = await fetch('/c/api/conversations', {
+                        method: 'POST',
+                        credentials: 'include',
+                    });
+                    if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + await r.text());
+                    const d = await r.json();
+                    if (!d.id) throw new Error('no id in response: ' + JSON.stringify(d));
+                    return d.id;
+                }""")
+                conversation_id = result
+                self._browser_chat_conversation_id = conversation_id
+            except Exception as exc:
+                raise RuntimeError(f"Failed to create conversation via browser: {exc}") from exc
+
+        # conversation_id is known — use it in send payload below.
+        # It is NOT yielded here; the caller tracks the id on its own.
+
+        # --- 2. Build the WebSocket URL ------------------------------------------
+        token = self.access_token()
+        ws_url = f"{CHAT_WEBSOCKET_URL}&clientSessionId={uuid.uuid4()}"
+        if token:
+            from urllib.parse import quote as _quote
+            ws_url += f"&accessToken={_quote(token)}"
+            if self._captured_identity_type:
+                ws_url += f"&X-UserIdentityType={_quote(self._captured_identity_type)}"
+
+        # --- 3. Open WebSocket inside the browser and stream frames back ---------
+        send_payload = json.dumps({
+            "event": "send",
+            "conversationId": conversation_id,
+            "content": [{"type": "text", "text": prompt}],
+            "mode": "smart",
+            "context": {},
+        })
+        set_opt = json.dumps(SET_OPTIONS_FRAME)
+        consents = json.dumps(CONSENTS_FRAME)
+        ws_url_esc = json.dumps(ws_url)  # JSON-encode for safe JS embedding
+
+        deadline = time.time() + timeout
+        result_queue = queue.Queue()
+
+        def on_frame(payload_raw: str) -> None:
+            """Called from JS via expose_binding for each WS frame."""
+            result_queue.put(("frame", payload_raw))
+
+        def on_ws_close() -> None:
+            result_queue.put(("close", ""))
+
+        def on_ws_error(msg: str) -> None:
+            result_queue.put(("error", msg))
+
+        try:
+            page.expose_binding("__copilot_ws_frame", lambda source, data: on_frame(data))
+            page.expose_binding("__copilot_ws_closed", lambda source: on_ws_close())
+            page.expose_binding("__copilot_ws_failed", lambda source, msg: on_ws_error(msg))
+        except Exception:
+            pass  # already exposed
+
+        page.evaluate(f"""() => {{
+            const ws = new WebSocket({ws_url_esc});
+            window.__copilotChat.ws = ws;
+            ws.onopen = () => {{
+                ws.send({json.dumps(set_opt)});
+                ws.send({json.dumps(consents)});
+                ws.send({json.dumps(send_payload)});
+            }};
+            ws.onmessage = (event) => {{
+                try {{ window.__copilot_ws_frame(event.data); }} catch(e) {{}}
+            }};
+            ws.onerror = () => {{
+                try {{ window.__copilot_ws_failed('WebSocket error'); }} catch(e) {{}}
+            }};
+            ws.onclose = () => {{
+                try {{ window.__copilot_ws_closed(); }} catch(e) {{}}
+            }};
+        }}""")
+
+        # --- 4. Read frames from the queue, yield content ------------------------
+        buffer = ""
+        is_started = False
+        image_prompt = None
+        last_msg = None
+
+        while time.time() < deadline:
+            try:
+                kind, data = result_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+
+            if kind == "error":
+                raise RuntimeError(f"Browser chat WebSocket error: {data}")
+            if kind == "close":
+                break
+
+            # kind == "frame"
+            buffer += data
+            messages, buffer = self._drain_json(buffer)
+            for msg in messages:
+                last_msg = msg
+                event = msg.get("event")
+                if event == "challenge":
+                    method = msg.get("method")
+                    if method in (None, "cloudflare"):
+                        raise RuntimeError(
+                            "Cloudflare Turnstile challenge received inside browser chat. "
+                            "This should not happen after a successful auto_clear."
+                        )
+                    # Solve proof-of-work challenges inline (same as the HTTP driver).
+                    from .challenges import solve_copilot_challenge as _solve_cop, solve_hashcash as _solve_hs
+                    parameter = msg.get("parameter")
+                    token_str = None
+                    if method == "hashcash" and parameter:
+                        token_str = _solve_hs(parameter)
+                    elif method == "copilot" and parameter:
+                        token_str = _solve_cop(parameter)
+                    if token_str is not None:
+                        page.evaluate(f"""() => {{
+                            const ws = window.__copilotChat.ws;
+                            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                            ws.send({json.dumps(json.dumps({{
+                                "event": "challengeResponse",
+                                "token": token_str,
+                                "method": method,
+                                "id": msg.get("id"),
+                            }}))});
+                            ws.send({json.dumps(send_payload)});
+                        }}""")
+                elif event == "appendText":
+                    is_started = True
+                    text = msg.get("text", "")
+                    if text:
+                        yield text
+                elif event == "generatingImage":
+                    image_prompt = msg.get("prompt")
+                elif event == "imageGenerated":
+                    yield ImageResponse(msg.get("url"), image_prompt,
+                                        {"preview": msg.get("thumbnailUrl")})
+                elif event == "done":
+                    # Close the WS in the browser.
+                    page.evaluate("() => { try { window.__copilotChat.ws?.close(); } catch(e) {} }")
+                    result_queue.put(("close", ""))
+                    return
+                elif event == "error":
+                    code = msg.get("errorCode") or msg
+                    raise RuntimeError(f"Copilot browser chat error: {code}")
+
+        if not is_started:
+            page.evaluate("() => { try { window.__copilotChat.ws?.close(); } catch(e) {} }")
+            raise RuntimeError(f"Browser chat invalid response: {last_msg}")
+
+    @staticmethod
+    def _drain_json(buf: str):
+        """Pull all complete JSON objects out of ``buf``."""
+        import json as _json
+        out = []
+        idx = 0
+        while idx < len(buf):
+            rest = buf[idx:].lstrip()
+            if not rest:
+                idx = len(buf)
+                break
+            try:
+                obj, end = _json.JSONDecoder().raw_decode(rest)
+            except _json.JSONDecodeError:
+                break
+            out.append(obj)
+            idx = len(buf) - len(rest) + end
+        return out, buf[idx:]
 
     # -- internals ----------------------------------------------------------
 

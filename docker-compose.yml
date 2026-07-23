@@ -5,10 +5,11 @@
 #   docker compose down           # stop and clean up
 #
 # First-time setup (interactive login MUST run on the host):
-#   python -m copilot login       # opens a visible browser, saves session/
+#   npm run login       # opens a visible browser, saves session/
 # Then start the container — it reuses the persisted session.
 #
 # The ./session directory persists browser profile + auth tokens across restarts.
+# After code changes: docker compose build --no-cache && docker compose up -d
 
 services:
   copilot-api:

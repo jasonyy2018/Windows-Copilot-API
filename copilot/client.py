@@ -142,16 +142,11 @@ class CopilotClient:
 
     def _stream_with_recovery(self, prompt, conversation_id, kwargs):
         """Drive the turn, recovering from an expired-clearance Turnstile by
-        refreshing clearance in a browser and retrying.
-
-        Recovery opens a *visible* browser by default: headless solving is
-        unreliable on low-trust egress, so the dependable path is a real window
-        (auto-clicked checkbox, or a human click). A headless pre-pass runs only
-        when ``headless_clear`` is set. Recovery happens only before any text is
-        emitted, so output is never duplicated.
+        refreshing clearance in a browser — and, if the refresh succeeds,
+        completing the **actual** request inside the same browser (Playwright
+        page evaluate + WebSocket), because cf_clearance earned by Playwright is
+        bound to Playwright's TLS fingerprint and gets rejected by curl_cffi.
         """
-        # Browser recovery passes, in order: a headless pre-pass (opt-in) then a
-        # visible window. Each entry is the ``headless`` flag for that pass.
         strategies = []
         if not self._anonymous:
             if self._headless_clear:
@@ -171,13 +166,13 @@ class CopilotClient:
                 **kwargs,
             )
             if conversation_id is None:
-                kw["return_conversation"] = True  # have the driver hand back its id
+                kw["return_conversation"] = True
             else:
                 kw["conversation_id"] = conversation_id
 
             if attempt:
                 _status(f"Retrying the message (attempt {attempt + 1}/{total})...")
-            produced = False  # any user-visible output yet? (Conversation doesn't count)
+            produced = False
             try:
                 for item in self._driver.create_completion(prompt, **kw):
                     if not isinstance(item, Conversation):
@@ -190,12 +185,37 @@ class CopilotClient:
                             "without duplicating output; surfacing the error.")
                     raise
                 if attempt >= len(strategies):
-                    # No (more) recovery passes available — anonymous, server
-                    # (no visible browser), or the last pass already ran.
                     _status("Cloudflare clearance could not be refreshed; giving up.")
                     raise
-                self._refresh_clearance(headless=strategies[attempt])
-                self._auth = None  # force a reload of the freshly-snapshotted auth
+                # Refresh clearance in a browser. If successful, complete the
+                # chat *inside* the same browser (curl_cffi can't reuse the
+                # cf_clearance earned by Playwright due to TLS fingerprint
+                # mismatch — see browser.browser_chat).
+                from .browser import BrowserCopilot
+                bot = BrowserCopilot(
+                    headless=strategies[attempt], proxy=self._proxy
+                )
+                try:
+                    earned = bot.auto_clear()
+                except Exception:
+                    bot.close()
+                    raise
+                if earned:
+                    _status("Clearance refreshed — completing request via browser chat.")
+                    self._auth = None
+                    for item in bot.browser_chat(
+                        prompt, conversation_id=conversation_id
+                    ):
+                        if isinstance(item, str):
+                            produced = True
+                            yield item
+                        elif isinstance(item, ImageResponse):
+                            produced = True
+                            yield item
+                    bot.close()
+                    return
+                bot.close()
+                self._auth = None  # fallback: retry curl_cffi
 
     def _refresh_clearance(self, headless: bool) -> None:
         """Refresh Cloudflare clearance via a browser, re-snapshotting token.json.
