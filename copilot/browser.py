@@ -832,17 +832,16 @@ class BrowserCopilot:
         # --- 2. Create conversation via browser fetch ----------------------------
         if not conversation_id:
             try:
-                result = page.evaluate("""async () => {
-                    const r = await fetch('/c/api/conversations', {
-                        method: 'POST',
-                        credentials: 'include',
-                    });
-                    if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + await r.text());
-                    const d = await r.json();
-                    if (!d.id) throw new Error('no id in response: ' + JSON.stringify(d));
-                    return d.id;
-                }""")
-                conversation_id = result
+                # Use Playwright's built-in APIRequestContext, which correctly
+                # sends the browser's cookies (same TLS context). page.evaluate()
+                # with fetch() often gets 403 due to CORS/CSP restrictions.
+                resp = page.request.post(f"{COPILOT_URL}c/api/conversations")
+                if not resp.ok:
+                    raise RuntimeError(f"HTTP {resp.status}: {resp.text()[:200]}")
+                data = resp.json()
+                conversation_id = data.get("id")
+                if not conversation_id:
+                    raise RuntimeError(f"no id in response: {data}")
                 self._browser_chat_conversation_id = conversation_id
             except Exception as exc:
                 raise RuntimeError(f"Failed to create conversation via browser: {exc}") from exc
