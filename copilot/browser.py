@@ -788,11 +788,11 @@ class BrowserCopilot:
 
     # --- in-page JavaScript for browser_chat --------------------------------------
 
-# Complete Copilot conversation inside the browser: create conversation, open
-# WebSocket, send handshake + send frames, collect response. Returns
-# ``{text, conversationId}``. Called via page.evaluate with the prompt string
-# and protocol constants as positional arguments.
-_BROWSER_CHAT_JS = """
+    # Complete Copilot conversation inside the browser: create conversation, open
+    # WebSocket, send handshake + send frames, collect response. Returns
+    # ``{text, conversationId}``. Called via page.evaluate with the prompt string
+    # and protocol constants as positional arguments.
+    _BROWSER_CHAT_JS = """
 async (args) => {
     const prompt = args.prompt;
     const setOptions = args.setOptions;
