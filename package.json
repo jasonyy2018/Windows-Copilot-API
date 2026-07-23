@@ -7,12 +7,12 @@
     "node": ">=20"
   },
   "scripts": {
-    "login": "python -m copilot login",
-    "ask": "python -m copilot ask",
-    "dev": "python app.py",
-    "start": "python app.py",
+    "login": "python3 -m copilot login",
+    "ask": "python3 -m copilot ask",
+    "dev": "python3 app.py",
+    "start": "python3 app.py",
     "install:playwright": "npx playwright install chromium",
-    "setup": "pip install -r requirements.txt && npx playwright install chromium"
+    "setup": "[ -d venv ] || python3 -m venv venv; source venv/bin/activate; pip install -r requirements.txt; npx playwright install chromium"
   },
   "dependencies": {
     "playwright": "1.60.0"
