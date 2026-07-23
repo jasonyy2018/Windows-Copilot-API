@@ -28,13 +28,10 @@ shapes with ``tests/diagnostic.py`` if Microsoft changes them.
 from __future__ import annotations
 
 import json
-import queue
 import sys
-import uuid
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Event
 from typing import Dict, Generator, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -789,7 +786,80 @@ class BrowserCopilot:
         dest.write_text(json.dumps(auth, indent=2), encoding="utf-8")
         return auth
 
-    def browser_chat(
+    # --- in-page JavaScript for browser_chat --------------------------------------
+
+# Complete Copilot conversation inside the browser: create conversation, open
+# WebSocket, send handshake + send frames, collect response. Returns
+# ``{text, conversationId}``. Called via page.evaluate with the prompt string
+# and protocol constants as positional arguments.
+_BROWSER_CHAT_JS = """
+async (args) => {
+    const prompt = args.prompt;
+    const setOptions = args.setOptions;
+    const consents = args.consents;
+    // 1. Create conversation
+    const r = await fetch('/c/api/conversations', {method:'POST', credentials:'include'});
+    if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + await r.text());
+    const conv = await r.json();
+    if (!conv.id) throw new Error('no conversation id');
+    const cid = conv.id;
+
+    // 2. Read MSAL access token from localStorage (same logic as _FIND_TOKEN_JS)
+    let token = null;
+    for (let i = 0; i < localStorage.length; i++) {
+        const v = localStorage.getItem(localStorage.key(i));
+        if (v && v.indexOf('"credentialType":"AccessToken"') !== -1) {
+            try {
+                const o = JSON.parse(v);
+                if (o && o.secret && o.target && o.target.indexOf('ChatAI') !== -1) {
+                    token = o.secret; break;
+                }
+            } catch(e) {}
+        }
+    }
+
+    // 3. Open WebSocket
+    const wsUrl = 'wss://copilot.microsoft.com/c/api/chat?api-version=2'
+        + '&clientSessionId=' + crypto.randomUUID()
+        + (token ? '&accessToken=' + encodeURIComponent(token) : '');
+    const ws = new WebSocket(wsUrl);
+    await new Promise((resolve, reject) => {
+        ws.onopen = resolve;
+        ws.onerror = () => reject(new Error('WebSocket connection failed'));
+    });
+
+    // 4. Send handshake + message
+    ws.send(JSON.stringify(setOptions));
+    ws.send(JSON.stringify(consents));
+    ws.send(JSON.stringify({
+        event: 'send',
+        conversationId: cid,
+        content: [{type: 'text', text: prompt}],
+        mode: 'smart',
+        context: {}
+    }));
+
+    // 5. Collect response frames
+    const texts = [];
+    let imageUrl = null, imagePrompt = null;
+    await new Promise((resolve, reject) => {
+        const deadline = Date.now() + 890000;
+        ws.onmessage = event => {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.event === 'appendText' && msg.text) texts.push(msg.text);
+                else if (msg.event === 'done') resolve();
+                else if (msg.event === 'error') reject(new Error(msg.errorCode || 'copilot_error'));
+            } catch(e) {}
+        };
+        ws.onerror = () => reject(new Error('WebSocket error'));
+        ws.onclose = () => { if (!texts.length) reject(new Error('ws_closed')); else resolve(); };
+        setTimeout(() => reject(new Error('timeout')), 890000);
+    });
+
+    return {text: texts.join(''), conversationId: cid};
+}
+"""
         self, prompt: str, conversation_id: str = None, timeout: int = 900
     ) -> Generator:
         """Complete a Copilot chat through the browser's own TLS context.
@@ -802,13 +872,12 @@ class BrowserCopilot:
 
         Before chatting it navigates the page back to Copilot — the caller may have
         left the page in an unpredictable state (e.g. after ``auto_clear``'s warmup
-        turn). Then it ensures authentication (minting a fresh token if needed),
-        creates a conversation, opens a WebSocket, and yields streamed responses.
+        turn). Then it creates a conversation, opens a WebSocket, and yields streamed
+        responses.
 
         Yields ``str`` text chunks (and :class:`copilot.models.ImageResponse` for
         generated images). ``conversation_id`` continues an existing thread or
-        creates a new one when ``None``. After iteration, read
-        ``self._browser_chat_conversation_id`` to retrieve the conversation id.
+        creates a new one when ``None``.
         """
         self._ensure_started()
         self._browser_chat_conversation_id = conversation_id
@@ -819,168 +888,26 @@ class BrowserCopilot:
         page.goto(COPILOT_URL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(2000)
 
-        # --- 1. Ensure a fresh chat token -----------------------------------------
-        self._install_ws_listener()
-        token = self.access_token()
-        if not token:
-            self._send_warmup()
-            deadline = time.time() + 45
-            while time.time() < deadline and not token:
-                token = self._captured_chat_token or self.access_token()
-                page.wait_for_timeout(500)
+        # Run the entire conversation inside the browser via evaluate().
+        # The JS creates a conversation, reads the MSAL token from localStorage,
+        # opens a WebSocket, sends handshake+message, and returns the response.
+        result = page.evaluate(
+            _BROWSER_CHAT_JS,
+            {
+                "prompt": prompt,
+                "setOptions": SET_OPTIONS_FRAME,
+                "consents": CONSENTS_FRAME,
+            },
+        )
+        text = result.get("text", "")
+        cid = result.get("conversationId")
 
-        # --- 2. Create conversation via browser fetch ----------------------------
-        if not conversation_id:
-            try:
-                # Use Playwright's built-in APIRequestContext, which correctly
-                # sends the browser's cookies (same TLS context). page.evaluate()
-                # with fetch() often gets 403 due to CORS/CSP restrictions.
-                resp = page.request.post(f"{COPILOT_URL}c/api/conversations")
-                if not resp.ok:
-                    raise RuntimeError(f"HTTP {resp.status}: {resp.text()[:200]}")
-                data = resp.json()
-                conversation_id = data.get("id")
-                if not conversation_id:
-                    raise RuntimeError(f"no id in response: {data}")
-                self._browser_chat_conversation_id = conversation_id
-            except Exception as exc:
-                raise RuntimeError(f"Failed to create conversation via browser: {exc}") from exc
+        if cid:
+            self._browser_chat_conversation_id = cid
 
-        # conversation_id is known — use it in send payload below.
-        # It is NOT yielded here; the caller tracks the id on its own.
-
-        # --- 3. Build the WebSocket URL ------------------------------------------
-        ws_url = f"{CHAT_WEBSOCKET_URL}&clientSessionId={uuid.uuid4()}"
-        if token:
-            from urllib.parse import quote as _quote
-            ws_url += f"&accessToken={_quote(token)}"
-            if self._captured_identity_type:
-                ws_url += f"&X-UserIdentityType={_quote(self._captured_identity_type)}"
-
-        # --- 3. Open WebSocket inside the browser and stream frames back ---------
-        send_payload = json.dumps({
-            "event": "send",
-            "conversationId": conversation_id,
-            "content": [{"type": "text", "text": prompt}],
-            "mode": "smart",
-            "context": {},
-        })
-        set_opt = json.dumps(SET_OPTIONS_FRAME)
-        consents = json.dumps(CONSENTS_FRAME)
-        ws_url_esc = json.dumps(ws_url)  # JSON-encode for safe JS embedding
-
-        deadline = time.time() + timeout
-        result_queue = queue.Queue()
-
-        def on_frame(payload_raw: str) -> None:
-            """Called from JS via expose_binding for each WS frame."""
-            result_queue.put(("frame", payload_raw))
-
-        def on_ws_close() -> None:
-            result_queue.put(("close", ""))
-
-        def on_ws_error(msg: str) -> None:
-            result_queue.put(("error", msg))
-
-        try:
-            page.expose_binding("__copilot_ws_frame", lambda source, data: on_frame(data))
-            page.expose_binding("__copilot_ws_closed", lambda source: on_ws_close())
-            page.expose_binding("__copilot_ws_failed", lambda source, msg: on_ws_error(msg))
-        except Exception:
-            pass  # already exposed
-
-        page.evaluate(f"""() => {{
-            window.__copilotChat = window.__copilotChat || {{}};
-            const ws = new WebSocket({ws_url_esc});
-            window.__copilotChat.ws = ws;
-            ws.onopen = () => {{
-                ws.send({json.dumps(set_opt)});
-                ws.send({json.dumps(consents)});
-                ws.send({json.dumps(send_payload)});
-            }};
-            ws.onmessage = (event) => {{
-                try {{ window.__copilot_ws_frame(event.data); }} catch(e) {{}}
-            }};
-            ws.onerror = () => {{
-                try {{ window.__copilot_ws_failed('WebSocket error'); }} catch(e) {{}}
-            }};
-            ws.onclose = () => {{
-                try {{ window.__copilot_ws_closed(); }} catch(e) {{}}
-            }};
-        }}""")
-
-        # --- 4. Read frames from the queue, yield content ------------------------
-        buffer = ""
-        is_started = False
-        image_prompt = None
-        last_msg = None
-
-        while time.time() < deadline:
-            try:
-                kind, data = result_queue.get(timeout=1)
-            except queue.Empty:
-                continue
-
-            if kind == "error":
-                raise RuntimeError(f"Browser chat WebSocket error: {data}")
-            if kind == "close":
-                break
-
-            # kind == "frame"
-            buffer += data
-            messages, buffer = self._drain_json(buffer)
-            for msg in messages:
-                last_msg = msg
-                event = msg.get("event")
-                if event == "challenge":
-                    method = msg.get("method")
-                    if method in (None, "cloudflare"):
-                        raise RuntimeError(
-                            "Cloudflare Turnstile challenge received inside browser chat. "
-                            "This should not happen after a successful auto_clear."
-                        )
-                    # Solve proof-of-work challenges inline (same as the HTTP driver).
-                    from .challenges import solve_copilot_challenge as _solve_cop, solve_hashcash as _solve_hs
-                    parameter = msg.get("parameter")
-                    token_str = None
-                    if method == "hashcash" and parameter:
-                        token_str = _solve_hs(parameter)
-                    elif method == "copilot" and parameter:
-                        token_str = _solve_cop(parameter)
-                    if token_str is not None:
-                        page.evaluate(f"""() => {{
-                            const ws = window.__copilotChat.ws;
-                            if (!ws || ws.readyState !== WebSocket.OPEN) return;
-                            ws.send({json.dumps(json.dumps({{
-                                "event": "challengeResponse",
-                                "token": token_str,
-                                "method": method,
-                                "id": msg.get("id"),
-                            }}))});
-                            ws.send({json.dumps(send_payload)});
-                        }}""")
-                elif event == "appendText":
-                    is_started = True
-                    text = msg.get("text", "")
-                    if text:
-                        yield text
-                elif event == "generatingImage":
-                    image_prompt = msg.get("prompt")
-                elif event == "imageGenerated":
-                    yield ImageResponse(msg.get("url"), image_prompt,
-                                        {"preview": msg.get("thumbnailUrl")})
-                elif event == "done":
-                    # Close the WS in the browser.
-                    page.evaluate("() => { try { window.__copilotChat.ws?.close(); } catch(e) {} }")
-                    result_queue.put(("close", ""))
-                    return
-                elif event == "error":
-                    code = msg.get("errorCode") or msg
-                    raise RuntimeError(f"Copilot browser chat error: {code}")
-
-        if not is_started:
-            page.evaluate("() => { try { window.__copilotChat.ws?.close(); } catch(e) {} }")
-            raise RuntimeError(f"Browser chat invalid response: {last_msg}")
+        # Yield the response text and return.
+        if text:
+            yield text
 
     @staticmethod
     def _drain_json(buf: str):
