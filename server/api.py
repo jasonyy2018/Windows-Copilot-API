@@ -23,8 +23,9 @@ from .schemas import ChatCompletionRequest
 app = FastAPI(title="Copilot OpenAI-compatible API", version="1.0.0")
 # Server runs headless. `headless_clear=True` attempts automatic Turnstile solving
 # when Cloudflare clearance expires — works on trusted egress (residential IPs).
-# `interactive_clear=False` prevents a visible browser from popping mid-request.
-client = CopilotClient(interactive_clear=False, headless_clear=True)
+# `interactive_clear=True` falls back to a visible browser if headless fails,
+# so clearance can be recovered even on datacenter IPs (requires X11/VNC).
+client = CopilotClient(interactive_clear=True, headless_clear=True)
 
 _CLEARANCE_HELP = (
     "Cloudflare clearance expired and could not be refreshed headlessly. "
